@@ -19,51 +19,36 @@ from utils import FileIOHelper, makeStringRed
 
 
 class STORMWikiLMConfigs(LMConfigs):
-    """Configurations for LLM used in different parts of STORM.
-
-    Given that different parts in STORM framework have different complexity, we use different LLM configurations
-    to achieve a balance between quality and efficiency. If no specific configuration is provided, we use the default
-    setup in the paper.
-    """
-
-    def __init__(self):
-        self.conv_simulator_lm = None  # LLM used in conversation simulator except for question asking.
-        self.question_asker_lm = None  # LLM used in question asking.
-        self.outline_gen_lm = None  # LLM used in outline generation.
-        self.article_gen_lm = None  # LLM used in article generation.
-        self.article_polish_lm = None  # LLM used in article polishing.
-
     def init_openai_model(
             self,
             openai_api_key: str,
-            openai_type: Literal["openai", "azure"],
+            openai_type: Literal["openai", "azure", "deepseek"],
             api_base: Optional[str] = None,
-            api_version: Optional[str] = None,
             temperature: Optional[float] = 1.0,
             top_p: Optional[float] = 0.9
     ):
-        """Legacy: Corresponding to the original setup in the NAACL'24 paper."""
         openai_kwargs = {
             'api_key': openai_api_key,
             'api_provider': openai_type,
             'temperature': temperature,
             'top_p': top_p,
-            'api_base': None
+            'api_base': api_base
         }
-        if openai_type and openai_type == 'openai':
-            self.conv_simulator_lm = OpenAIModel(model='gpt-3.5-turbo-instruct',
-                                                 max_tokens=500, **openai_kwargs)
-            self.question_asker_lm = OpenAIModel(model='gpt-3.5-turbo',
-                                                 max_tokens=500, **openai_kwargs)
-            # 1/12/2024: Update gpt-4 to gpt-4-1106-preview. (Currently keep the original setup when using azure.)
-            self.outline_gen_lm = OpenAIModel(model='gpt-4-0125-preview',
-                                              max_tokens=400, **openai_kwargs)
-            self.article_gen_lm = OpenAIModel(model='gpt-4o-2024-05-13',
-                                              max_tokens=700, **openai_kwargs)
-            self.article_polish_lm = OpenAIModel(model='gpt-4o-2024-05-13',
-                                                 max_tokens=4000, **openai_kwargs)
+        
+        if openai_type == "deepseek":
+            model_name = 'deepseek-chat'
+            if not api_base:
+                openai_kwargs['api_base'] = "https://api.deepseek.com/v1"
+        elif openai_type == "openai":
+            model_name = 'gpt-3.5-turbo-instruct'
         else:
-            logging.warning('No valid OpenAI API provider is provided. Cannot use default LLM configurations.')
+            raise ValueError(f"Unsupported openai_type: {openai_type}")
+
+        self.conv_simulator_lm = OpenAIModel(model=model_name, max_tokens=500, **openai_kwargs)
+        self.question_asker_lm = OpenAIModel(model=model_name, max_tokens=500, **openai_kwargs)
+        self.outline_gen_lm = OpenAIModel(model=model_name, max_tokens=400, **openai_kwargs)
+        self.article_gen_lm = OpenAIModel(model=model_name, max_tokens=700, **openai_kwargs)
+        self.article_polish_lm = OpenAIModel(model=model_name, max_tokens=4000, **openai_kwargs)
 
     def set_conv_simulator_lm(self, model: Union[dspy.dsp.LM, dspy.dsp.HFModel]):
         self.conv_simulator_lm = model
@@ -281,35 +266,48 @@ class STORMWikiRunner(Engine):
         self.article_output_dir = os.path.join(self.args.output_dir, self.article_dir_name)
         os.makedirs(self.article_output_dir, exist_ok=True)
 
+        logging.info(f"Starting STORM Wiki generation for topic: {topic}")
+
         # research module
         information_table: StormInformationTable = None
         if do_research:
+            logging.info("Starting research phase...")
             information_table = self.run_knowledge_curation_module(ground_truth_url=ground_truth_url,
                                                                    callback_handler=callback_handler)
+            logging.info("Research phase completed.")
+
         # outline generation module
         outline: StormArticle = None
         if do_generate_outline:
+            logging.info("Starting outline generation phase...")
             # load information table if it's not initialized
             if information_table is None:
                  information_table = self._load_information_table_from_local_fs(os.path.join(self.article_output_dir, 'conversation_log.json'))
             outline = self.run_outline_generation_module(information_table=information_table,
                                                          callback_handler=callback_handler)
+            logging.info("Outline generation phase completed.")
 
         # article generation module
         draft_article: StormArticle = None
         if do_generate_article:
+            logging.info("Starting article generation phase...")
             if information_table is None:
-                 information_table = self._load_information_table_from_local_fs(os.path.join(self.article_output_dir, 'conversation_log.json'))
+                information_table = self._load_information_table_from_local_fs(os.path.join(self.article_output_dir, 'conversation_log.json'))
             if outline is None:
                 outline = self._load_outline_from_local_fs(topic=topic, outline_local_path=os.path.join(self.article_output_dir, 'storm_gen_outline.txt'))
             draft_article = self.run_article_generation_module(outline=outline,
                                                                information_table=information_table,
                                                                callback_handler=callback_handler)
+            logging.info("Article generation phase completed.")
 
         # article polishing module
         if do_polish_article:
+            logging.info("Starting article polishing phase...")
             if draft_article is None:
                 draft_article_path = os.path.join(self.article_output_dir, 'storm_gen_article.txt')
                 url_to_info_path = os.path.join(self.article_output_dir, 'url_to_info.json')
                 draft_article =  self._load_draft_article_from_local_fs(topic=topic, draft_article_path=draft_article_path, url_to_info_path=url_to_info_path)
             self.run_article_polishing_module(draft_article=draft_article, remove_duplicate=remove_duplicate)
+            logging.info("Article polishing phase completed.")
+
+        logging.info(f"STORM Wiki generation for topic '{topic}' completed.")
